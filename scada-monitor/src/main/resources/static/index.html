@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>SCADA</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        body { font-family: Arial; padding: 20px; max-width: 600px; margin: auto; }
+        .card { background: #f5f5f5; border-radius: 12px; padding: 20px; margin-top: 20px; }
+        .value { font-size: 32px; font-weight: bold; }
+        .bar { height: 30px; background: #4caf50; border-radius: 15px; text-align: center; color: white; line-height: 30px; }
+        input { width: 100%; padding: 8px; margin: 10px 0; }
+        button { padding: 10px; background: #2196f3; color: white; border: none; border-radius: 6px; cursor: pointer; margin: 5px; }
+        #status { font-weight: bold; }
+        .sensor-selector { display: flex; gap: 10px; flex-wrap: wrap; margin: 20px 0; }
+        .sensor-btn { background: #e0e0e0; color: black; }
+        .sensor-btn.active { background: #2196f3; color: white; }
+    </style>
+</head>
+<body>
+<h2>🌡️ SCADA Minimal</h2>
+<div id="status">🔴 Отключено</div>
+
+<div class="sensor-selector" id="sensorSelector">
+    <!-- Датчики будут появляться здесь -->
+</div>
+
+<button onclick="addNewSensor()">➕ Добавить датчик</button>
+
+<div class="card" id="sensorCard">
+    <h3>Датчик: <span id="currentSensorId">sensor1</span></h3>
+    <div>Температура: <span id="temp" class="value">--</span> °C</div>
+    <div style="margin: 15px 0;">
+        <div>Заполненность: <span id="fill">--</span>%</div>
+        <div class="bar" id="fillBar" style="width: 0%">0%</div>
+    </div>
+
+    <input type="number" id="tempInput" placeholder="Новая температура (-100..100)" step="0.1" min="-100" max="100">
+    <button onclick="updateTemp()">Изменить температуру</button>
+
+    <input type="range" id="fillInput" min="0" max="100" value="0"
+           oninput="updateFillPreview(this.value)">
+    <span id="fillPreview">0%</span>
+    <button onclick="updateFill()">Изменить заполненность</button>
+</div>
+
+<script>
+    let stompClient = null;
+    let currentSensorId = localStorage.getItem('currentSensor') || 'sensor1';
+    let sensors = [];
+
+    function connect() {
+        const socket = new SockJS('/scada-websocket');
+        stompClient = Stomp.over(socket);
+        stompClient.debug = null;
+
+        stompClient.connect({}, function() {
+            document.getElementById('status').innerHTML = '🟢 WebSocket подключён';
+
+            stompClient.subscribe('/topic/sensor-updates', function(msg) {
+                const data = JSON.parse(msg.body);
+                updateUI(data);
+            });
+
+            loadAllSensors();
+
+        }, function() {
+            document.getElementById('status').innerHTML = '🔴 Ошибка, переподключение...';
+            setTimeout(connect, 3000);
+        });
+    }
+
+    async function loadAllSensors() {
+        try {
+            const response = await fetch('/api/sensors');
+            if (response.ok) {
+                sensors = await response.json();
+                renderSensorButtons();
+
+                if (sensors.includes(currentSensorId)) {
+                    switchToSensor(currentSensorId);
+                } else if (sensors.length > 0) {
+                    switchToSensor(sensors[0]);
+                }
+            }
+        } catch (error) {
+            console.log('Ошибка загрузки списка датчиков');
+        }
+    }
+
+    function renderSensorButtons() {
+        const container = document.getElementById('sensorSelector');
+        container.innerHTML = '';
+        sensors.forEach(sensorId => {
+            const btn = document.createElement('button');
+            btn.className = 'sensor-btn' + (sensorId === currentSensorId ? ' active' : '');
+            btn.textContent = sensorId;
+            btn.onclick = () => switchToSensor(sensorId);
+            container.appendChild(btn);
+        });
+    }
+
+    async function switchToSensor(sensorId) {
+        currentSensorId = sensorId;
+
+        localStorage.setItem('currentSensor', sensorId);
+
+        document.getElementById('currentSensorId').textContent = sensorId;
+        renderSensorButtons();
+
+        try {
+            const response = await fetch(`/api/state/${sensorId}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data) updateUI(data);
+            }
+        } catch (error) {
+            console.log('Нет данных для датчика');
+        }
+    }
+
+    async function addNewSensor() {
+        try {
+            const response = await fetch('/api/sensors/add', {
+                method: 'POST'
+            });
+            if (response.ok) {
+                const newSensor = await response.json();
+                sensors.push(newSensor.sensorId);
+                renderSensorButtons();
+
+                console.log('✅ Добавлен датчик:', newSensor.sensorId);
+            }
+        } catch (error) {
+            alert('Ошибка при добавлении датчика');
+        }
+    }
+
+    function updateUI(data) {
+        if (data.sensorId === currentSensorId) {
+            if (data.temperature !== undefined && data.temperature !== null) {
+                document.getElementById('temp').innerText = data.temperature.toFixed(1);
+            }
+            if (data.fillLevel !== undefined && data.fillLevel !== null) {
+                document.getElementById('fill').innerText = data.fillLevel;
+                const bar = document.getElementById('fillBar');
+                bar.style.width = data.fillLevel + '%';
+                bar.innerText = data.fillLevel + '%';
+            }
+        }
+    }
+
+    function updateTemp() {
+        const val = parseFloat(document.getElementById('tempInput').value);
+        if (isNaN(val)) return;
+        if (val < -100 || val > 100) {
+            alert('Температура должна быть от -100 до 100°C');
+            return;
+        }
+
+        fetch('/api/sensor/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sensorId: currentSensorId, temperature: val })
+        });
+
+        document.getElementById('tempInput').value = '';
+    }
+
+    function updateFill() {
+        const val = parseInt(document.getElementById('fillInput').value);
+
+        fetch('/api/sensor/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sensorId: currentSensorId, fillLevel: val })
+        });
+
+        document.getElementById('fillInput').value = 0;
+        document.getElementById('fillPreview').innerText = '0%';
+    }
+
+    function updateFillPreview(value) {
+        document.getElementById('fillPreview').innerText = value + '%';
+    }
+
+    window.onload = connect;
+</script>
+</body>
+</html>
